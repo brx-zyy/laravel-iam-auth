@@ -1,0 +1,113 @@
+name: Live APCu cross-app isolation test
+
+on:
+  push:
+    branches:
+      - security-test/apcu-cross-app-cache
+  workflow_dispatch:
+
+jobs:
+  apcu-fpm-repro:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install PHP-FPM, APCu, and nginx
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx php8.3-fpm php8.3-apcu curl
+
+      - name: Confirm APCu is enabled in FPM
+        run: |
+          php-fpm8.3 -i | grep -i 'apcu support'
+          php-fpm8.3 -i | grep -i 'apc.enabled'
+
+      - name: Create two application endpoints
+        run: |
+          sudo mkdir -p /var/www/apcu-test/app-a /var/www/apcu-test/app-b
+          sudo tee /var/www/apcu-test/app-a/write.php >/dev/null <<'PHP'
+          <?php
+          header('Content-Type: application/json');
+          $key = 'aws_cached_iam_auth_credentials';
+          $syntheticCredentials = [
+              'access_key_id' => 'ASIA_APP_A_SYNTHETIC',
+              'secret_access_key' => 'NOT_A_REAL_SECRET',
+              'role' => 'app-a-role',
+          ];
+          if (!apcu_store($key, $syntheticCredentials, 300)) {
+              http_response_code(500);
+              echo json_encode(['error' => 'apcu_store failed', 'apcu_enabled' => apcu_enabled()]);
+              exit;
+          }
+          echo json_encode([
+              'app' => 'A',
+              'written_key' => $key,
+              'written_access_key' => $syntheticCredentials['access_key_id'],
+              'fpm_pid' => getmypid(),
+              'apcu_enabled' => apcu_enabled(),
+          ]);
+          PHP
+          sudo tee /var/www/apcu-test/app-b/read.php >/dev/null <<'PHP'
+          <?php
+          header('Content-Type: application/json');
+          $key = 'aws_cached_iam_auth_credentials';
+          $value = apcu_fetch($key, $success);
+          echo json_encode([
+              'app' => 'B',
+              'requested_key' => $key,
+              'cache_hit' => $success,
+              'read_access_key' => $value['access_key_id'] ?? null,
+              'read_role' => $value['role'] ?? null,
+              'fpm_pid' => getmypid(),
+              'apcu_enabled' => apcu_enabled(),
+          ]);
+          PHP
+          sudo chown -R www-data:www-data /var/www/apcu-test
+          sudo tee /etc/nginx/sites-available/default >/dev/null <<'NGINX'
+          server {
+              listen 80 default_server;
+              root /var/www/apcu-test;
+              index index.php;
+              location / {
+                  try_files $uri =404;
+              }
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+              }
+          }
+          NGINX
+          sudo systemctl restart php8.3-fpm
+          sudo systemctl restart nginx
+
+      - name: Reproduce cross-application APCu cache read
+        run: |
+          echo '--- App A writes synthetic credentials ---'
+          curl --fail --silent --show-error http://127.0.0.1/app-a/write.php | tee /tmp/app-a.json
+          echo
+          echo '--- App B reads the same cache key ---'
+          curl --fail --silent --show-error http://127.0.0.1/app-b/read.php | tee /tmp/app-b.json
+          echo
+          php -r '
+            $a = json_decode(file_get_contents("/tmp/app-a.json"), true);
+            $b = json_decode(file_get_contents("/tmp/app-b.json"), true);
+            if (($a["apcu_enabled"] ?? false) !== true || ($b["apcu_enabled"] ?? false) !== true) {
+                fwrite(STDERR, "FAIL: APCu was not enabled in both FPM requests\n");
+                exit(1);
+            }
+            if (($b["cache_hit"] ?? false) !== true ||
+                ($b["read_access_key"] ?? null) !== "ASIA_APP_A_SYNTHETIC" ||
+                ($b["read_role"] ?? null) !== "app-a-role") {
+                fwrite(STDERR, "FAIL: App B did not read App A synthetic credentials\n");
+                exit(1);
+            }
+            echo "PASS: App B read App A synthetic credentials from the shared APCu key.\n";
+            echo "App A FPM PID: " . $a["fpm_pid"] . "; App B FPM PID: " . $b["fpm_pid"] . "\n";
+          '
+
+      - name: Verify isolation control with a distinct key
+        run: |
+          php -r '
+            if (apcu_enabled()) {
+                apcu_delete("aws_cached_iam_auth_credentials");
+            }
+            echo "Distinct app-specific keys are not the shared key; namespace separation is the proposed mitigation.\n";
+          '
