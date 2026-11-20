@@ -23,10 +23,12 @@ jobs:
 
       - name: Create package-backed App A and App B endpoints
         run: |
-          sudo mkdir -p /var/www/iam-auth-test/app-a /var/www/iam-auth-test/app-b
+          sudo mkdir -p /var/www/iam-auth-test/app-a /var/www/iam-auth-test/app-b /var/www/iam-auth-test/package
+          sudo cp -a "$GITHUB_WORKSPACE/." /var/www/iam-auth-test/package/
+          sudo chown -R www-data:www-data /var/www/iam-auth-test/package
           sudo tee /var/www/iam-auth-test/app-a/write.php >/dev/null <<'PHP'
           <?php
-          require '__REPO_ROOT__/vendor/autoload.php';
+          require '/var/www/iam-auth-test/package/vendor/autoload.php';
 
           header('Content-Type: application/json');
           $store = new \Hackthebox\IamAuth\Cache\AwsCredentialCacheStore();
@@ -49,7 +51,7 @@ jobs:
 
           sudo tee /var/www/iam-auth-test/app-b/read.php >/dev/null <<'PHP'
           <?php
-          require '__REPO_ROOT__/vendor/autoload.php';
+          require '/var/www/iam-auth-test/package/vendor/autoload.php';
 
           header('Content-Type: application/json');
           $store = new \Hackthebox\IamAuth\Cache\AwsCredentialCacheStore();
@@ -104,7 +106,6 @@ jobs:
           ], JSON_THROW_ON_ERROR);
           PHP
 
-          sudo sed -i "s|__REPO_ROOT__|$GITHUB_WORKSPACE|g" /var/www/iam-auth-test/app-a/write.php /var/www/iam-auth-test/app-b/read.php
           sudo chown -R www-data:www-data /var/www/iam-auth-test
           sudo tee /etc/php/8.3/fpm/pool.d/www.conf >/dev/null <<'POOL'
           [www]
