@@ -32,19 +32,19 @@ jobs:
           use Hackthebox\IamAuth\Cache\AwsCredentialCacheStore;
 
           header('Content-Type: application/json');
-          $store = new AwsCredentialCacheStore();
-          $credentials = new Credentials(
+          $store = new \\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore();
+          $credentials = new \\Aws\\Credentials\\Credentials(
               'ASIA_APP_A_SYNTHETIC',
               'NOT_A_REAL_SECRET',
               'SYNTHETIC_SESSION_TOKEN',
               time() + 3600
           );
-          $store->set(AwsCredentialCacheStore::CACHE_KEY, $credentials, 3600);
+          $store->set(\\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore::CACHE_KEY, $credentials, 3600);
 
           echo json_encode([
               'app' => 'A',
               'written_access_key' => $credentials->getAccessKeyId(),
-              'cache_key' => AwsCredentialCacheStore::CACHE_KEY,
+              'cache_key' => \\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore::CACHE_KEY,
               'fpm_pid' => getmypid(),
               'apcu_enabled' => function_exists('apcu_enabled') && apcu_enabled(),
           ], JSON_THROW_ON_ERROR);
@@ -60,14 +60,14 @@ jobs:
           use Hackthebox\IamAuth\Cache\CachedCredentialProvider;
 
           header('Content-Type: application/json');
-          $store = new AwsCredentialCacheStore();
+          $store = new \\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore();
 
           // Simulate App B's independent credential source. If the shared package
           // cache is hit, this provider must not be called.
           $baseCalls = 0;
           $appBBase = function () use (&$baseCalls) {
               $baseCalls++;
-              return Create::promiseFor(new Credentials(
+              return \\GuzzleHttp\\Promise\\Create::promiseFor(new \\Aws\\Credentials\\Credentials(
                   'ASIA_APP_B_SYNTHETIC',
                   'NOT_A_REAL_SECRET',
                   'SYNTHETIC_SESSION_TOKEN',
@@ -75,10 +75,10 @@ jobs:
               ));
           };
 
-          $provider = new CachedCredentialProvider(
+          $provider = new \\Hackthebox\\IamAuth\\Cache\\CachedCredentialProvider(
               $appBBase,
               $store,
-              AwsCredentialCacheStore::CACHE_KEY
+              \\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore::CACHE_KEY
           );
           $resolved = $provider()->wait();
 
@@ -94,10 +94,10 @@ jobs:
                   time() + 3600
               ));
           };
-          $controlProvider = new CachedCredentialProvider(
+          $controlProvider = new \\Hackthebox\\IamAuth\\Cache\\CachedCredentialProvider(
               $controlBase,
               $store,
-              'app-b:'.AwsCredentialCacheStore::CACHE_KEY
+              'app-b:'.\\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore::CACHE_KEY
           );
           $controlResolved = $controlProvider()->wait();
 
@@ -127,7 +127,6 @@ jobs:
           pm.max_spare_servers = 3
           pm.max_requests = 1
           clear_env = no
-          env[REPO_ROOT] = ${GITHUB_WORKSPACE}
           php_admin_value[apc.enabled] = 1
           php_admin_value[apc.enable_cli] = 0
           POOL
@@ -142,10 +141,11 @@ jobs:
               location ~ \.php$ {
                   include snippets/fastcgi-php.conf;
                   fastcgi_pass unix:/run/php/php8.3-fpm.sock;
-                  fastcgi_param REPO_ROOT ${GITHUB_WORKSPACE};
+                  fastcgi_param REPO_ROOT __REPO_ROOT__;
               }
           }
           NGINX
+          sudo sed -i "s|__REPO_ROOT__|$GITHUB_WORKSPACE|g" /etc/nginx/sites-available/default
           sudo systemctl restart php8.3-fpm
           sudo systemctl restart nginx
 
