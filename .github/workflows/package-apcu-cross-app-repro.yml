@@ -1,0 +1,189 @@
+name: Package-level APCu cross-app credential reproduction
+
+on:
+  push:
+    branches:
+      - security-test/apcu-cross-app-cache
+  workflow_dispatch:
+
+jobs:
+  package-apcu-repro:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install PHP-FPM, APCu, Composer, and nginx
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx php8.3-cli php8.3-fpm php8.3-apcu php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip composer curl
+
+      - name: Install package dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Create package-backed App A and App B endpoints
+        run: |
+          sudo mkdir -p /var/www/iam-auth-test/app-a /var/www/iam-auth-test/app-b
+          sudo tee /var/www/iam-auth-test/app-a/write.php >/dev/null <<'PHP'
+          <?php
+          require $_SERVER['REPO_ROOT'].'/vendor/autoload.php';
+
+          use Aws\Credentials\Credentials;
+          use Hackthebox\IamAuth\Cache\AwsCredentialCacheStore;
+
+          header('Content-Type: application/json');
+          $store = new AwsCredentialCacheStore();
+          $credentials = new Credentials(
+              'ASIA_APP_A_SYNTHETIC',
+              'NOT_A_REAL_SECRET',
+              'SYNTHETIC_SESSION_TOKEN',
+              time() + 3600
+          );
+          $store->set(AwsCredentialCacheStore::CACHE_KEY, $credentials, 3600);
+
+          echo json_encode([
+              'app' => 'A',
+              'written_access_key' => $credentials->getAccessKeyId(),
+              'cache_key' => AwsCredentialCacheStore::CACHE_KEY,
+              'fpm_pid' => getmypid(),
+              'apcu_enabled' => function_exists('apcu_enabled') && apcu_enabled(),
+          ], JSON_THROW_ON_ERROR);
+          PHP
+
+          sudo tee /var/www/iam-auth-test/app-b/read.php >/dev/null <<'PHP'
+          <?php
+          require $_SERVER['REPO_ROOT'].'/vendor/autoload.php';
+
+          use Aws\Credentials\Credentials;
+          use GuzzleHttp\Promise\Create;
+          use Hackthebox\IamAuth\Cache\AwsCredentialCacheStore;
+          use Hackthebox\IamAuth\Cache\CachedCredentialProvider;
+
+          header('Content-Type: application/json');
+          $store = new AwsCredentialCacheStore();
+
+          // Simulate App B's independent credential source. If the shared package
+          // cache is hit, this provider must not be called.
+          $baseCalls = 0;
+          $appBBase = function () use (&$baseCalls) {
+              $baseCalls++;
+              return Create::promiseFor(new Credentials(
+                  'ASIA_APP_B_SYNTHETIC',
+                  'NOT_A_REAL_SECRET',
+                  'SYNTHETIC_SESSION_TOKEN',
+                  time() + 3600
+              ));
+          };
+
+          $provider = new CachedCredentialProvider(
+              $appBBase,
+              $store,
+              AwsCredentialCacheStore::CACHE_KEY
+          );
+          $resolved = $provider()->wait();
+
+          // Control: use a separate namespace. App B should miss App A's entry
+          // and resolve its own synthetic credentials.
+          $controlBaseCalls = 0;
+          $controlBase = function () use (&$controlBaseCalls) {
+              $controlBaseCalls++;
+              return Create::promiseFor(new Credentials(
+                  'ASIA_APP_B_SYNTHETIC',
+                  'NOT_A_REAL_SECRET',
+                  'SYNTHETIC_SESSION_TOKEN',
+                  time() + 3600
+              ));
+          };
+          $controlProvider = new CachedCredentialProvider(
+              $controlBase,
+              $store,
+              'app-b:'.AwsCredentialCacheStore::CACHE_KEY
+          );
+          $controlResolved = $controlProvider()->wait();
+
+          echo json_encode([
+              'app' => 'B',
+              'resolved_access_key' => $resolved->getAccessKeyId(),
+              'base_provider_calls' => $baseCalls,
+              'control_access_key' => $controlResolved->getAccessKeyId(),
+              'control_base_provider_calls' => $controlBaseCalls,
+              'fpm_pid' => getmypid(),
+              'apcu_enabled' => function_exists('apcu_enabled') && apcu_enabled(),
+          ], JSON_THROW_ON_ERROR);
+          PHP
+
+          sudo chown -R www-data:www-data /var/www/iam-auth-test
+          sudo tee /etc/php/8.3/fpm/pool.d/www.conf >/dev/null <<'POOL'
+          [www]
+          user = www-data
+          group = www-data
+          listen = /run/php/php8.3-fpm.sock
+          listen.owner = www-data
+          listen.group = www-data
+          pm = dynamic
+          pm.max_children = 5
+          pm.start_servers = 2
+          pm.min_spare_servers = 2
+          pm.max_spare_servers = 3
+          pm.max_requests = 1
+          clear_env = no
+          env[REPO_ROOT] = ${GITHUB_WORKSPACE}
+          php_admin_value[apc.enabled] = 1
+          php_admin_value[apc.enable_cli] = 0
+          POOL
+
+          sudo tee /etc/nginx/sites-available/default >/dev/null <<'NGINX'
+          server {
+              listen 80 default_server;
+              root /var/www/iam-auth-test;
+              location / {
+                  try_files $uri =404;
+              }
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+                  fastcgi_param REPO_ROOT ${GITHUB_WORKSPACE};
+              }
+          }
+          NGINX
+          sudo systemctl restart php8.3-fpm
+          sudo systemctl restart nginx
+
+      - name: Execute actual package credential-cache flow across FPM requests
+        run: |
+          echo '--- App A: package AwsCredentialCacheStore writes synthetic credentials ---'
+          curl --fail --silent --show-error http://127.0.0.1/app-a/write.php | tee /tmp/package-app-a.json
+          echo
+          echo '--- App B: package CachedCredentialProvider resolves credentials ---'
+          curl --fail --silent --show-error http://127.0.0.1/app-b/read.php | tee /tmp/package-app-b.json
+          echo
+          php -r '
+            $a = json_decode(file_get_contents("/tmp/package-app-a.json"), true, 512, JSON_THROW_ON_ERROR);
+            $b = json_decode(file_get_contents("/tmp/package-app-b.json"), true, 512, JSON_THROW_ON_ERROR);
+
+            if (($a["apcu_enabled"] ?? false) !== true || ($b["apcu_enabled"] ?? false) !== true) {
+                fwrite(STDERR, "FAIL: APCu was not enabled in both FPM requests\n");
+                exit(1);
+            }
+            if (($a["fpm_pid"] ?? null) === ($b["fpm_pid"] ?? null)) {
+                fwrite(STDERR, "FAIL: requests did not execute in distinct FPM workers\n");
+                exit(1);
+            }
+            if (($b["resolved_access_key"] ?? null) !== "ASIA_APP_A_SYNTHETIC" ||
+                ($b["base_provider_calls"] ?? null) !== 0) {
+                fwrite(STDERR, "FAIL: package CachedCredentialProvider did not consume App A cached credentials\n");
+                exit(1);
+            }
+            if (($b["control_access_key"] ?? null) !== "ASIA_APP_B_SYNTHETIC" ||
+                ($b["control_base_provider_calls"] ?? null) !== 1) {
+                fwrite(STDERR, "FAIL: distinct-key control did not isolate App B\n");
+                exit(1);
+            }
+
+            echo "PASS: actual package classes reproduced cross-app credential reuse.\n";
+            echo "App A FPM PID: {$a["fpm_pid"]}; App B FPM PID: {$b["fpm_pid"]}\n";
+            echo "App B resolved shared key to: {$b["resolved_access_key"]}\n";
+            echo "App B base provider calls on shared key: {$b["base_provider_calls"]}\n";
+            echo "Distinct-key control resolved to: {$b["control_access_key"]}\n";
+            echo "Distinct-key control base provider calls: {$b["control_base_provider_calls"]}\n";
+          '
