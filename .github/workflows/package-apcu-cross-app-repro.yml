@@ -26,7 +26,7 @@ jobs:
           sudo mkdir -p /var/www/iam-auth-test/app-a /var/www/iam-auth-test/app-b
           sudo tee /var/www/iam-auth-test/app-a/write.php >/dev/null <<'PHP'
           <?php
-          require $_SERVER['REPO_ROOT'].'/vendor/autoload.php';
+          require '__REPO_ROOT__/vendor/autoload.php';
 
           header('Content-Type: application/json');
           $store = new \Hackthebox\IamAuth\Cache\AwsCredentialCacheStore();
@@ -104,6 +104,7 @@ jobs:
           ], JSON_THROW_ON_ERROR);
           PHP
 
+          sudo sed -i "s|__REPO_ROOT__|$GITHUB_WORKSPACE|g" /var/www/iam-auth-test/app-a/write.php /var/www/iam-auth-test/app-b/read.php
           sudo chown -R www-data:www-data /var/www/iam-auth-test
           sudo tee /etc/php/8.3/fpm/pool.d/www.conf >/dev/null <<'POOL'
           [www]
@@ -133,21 +134,19 @@ jobs:
               location ~ \.php$ {
                   include snippets/fastcgi-php.conf;
                   fastcgi_pass unix:/run/php/php8.3-fpm.sock;
-                  fastcgi_param REPO_ROOT __REPO_ROOT__;
               }
           }
           NGINX
-          sudo sed -i "s|__REPO_ROOT__|$GITHUB_WORKSPACE|g" /etc/nginx/sites-available/default
           sudo systemctl restart php8.3-fpm
           sudo systemctl restart nginx
 
       - name: Execute actual package credential-cache flow across FPM requests
         run: |
           echo '--- App A: package AwsCredentialCacheStore writes synthetic credentials ---'
-          curl --fail --silent --show-error http://127.0.0.1/app-a/write.php | tee /tmp/package-app-a.json
+          curl --fail --silent --show-error http://127.0.0.1/app-a/write.php | tee /tmp/package-app-a.json || { sudo tail -n 100 /var/log/nginx/error.log; sudo tail -n 100 /var/log/php8.3-fpm.log; exit 1; }
           echo
           echo '--- App B: package CachedCredentialProvider resolves credentials ---'
-          curl --fail --silent --show-error http://127.0.0.1/app-b/read.php | tee /tmp/package-app-b.json
+          curl --fail --silent --show-error http://127.0.0.1/app-b/read.php | tee /tmp/package-app-b.json || { sudo tail -n 100 /var/log/nginx/error.log; sudo tail -n 100 /var/log/php8.3-fpm.log; exit 1; }
           echo
           php -r '
             $a = json_decode(file_get_contents("/tmp/package-app-a.json"), true, 512, JSON_THROW_ON_ERROR);
