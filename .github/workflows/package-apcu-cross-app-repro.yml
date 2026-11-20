@@ -28,23 +28,20 @@ jobs:
           <?php
           require $_SERVER['REPO_ROOT'].'/vendor/autoload.php';
 
-          use Aws\Credentials\Credentials;
-          use Hackthebox\IamAuth\Cache\AwsCredentialCacheStore;
-
           header('Content-Type: application/json');
-          $store = new \\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore();
-          $credentials = new \\Aws\\Credentials\\Credentials(
+          $store = new \Hackthebox\IamAuth\Cache\AwsCredentialCacheStore();
+          $credentials = new \Aws\Credentials\Credentials(
               'ASIA_APP_A_SYNTHETIC',
               'NOT_A_REAL_SECRET',
               'SYNTHETIC_SESSION_TOKEN',
               time() + 3600
           );
-          $store->set(\\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore::CACHE_KEY, $credentials, 3600);
+          $store->set(\Hackthebox\IamAuth\Cache\AwsCredentialCacheStore::CACHE_KEY, $credentials, 3600);
 
           echo json_encode([
               'app' => 'A',
               'written_access_key' => $credentials->getAccessKeyId(),
-              'cache_key' => \\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore::CACHE_KEY,
+              'cache_key' => \Hackthebox\IamAuth\Cache\AwsCredentialCacheStore::CACHE_KEY,
               'fpm_pid' => getmypid(),
               'apcu_enabled' => function_exists('apcu_enabled') && apcu_enabled(),
           ], JSON_THROW_ON_ERROR);
@@ -54,20 +51,15 @@ jobs:
           <?php
           require $_SERVER['REPO_ROOT'].'/vendor/autoload.php';
 
-          use Aws\Credentials\Credentials;
-          use GuzzleHttp\Promise\Create;
-          use Hackthebox\IamAuth\Cache\AwsCredentialCacheStore;
-          use Hackthebox\IamAuth\Cache\CachedCredentialProvider;
-
           header('Content-Type: application/json');
-          $store = new \\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore();
+          $store = new \Hackthebox\IamAuth\Cache\AwsCredentialCacheStore();
 
-          // Simulate App B's independent credential source. If the shared package
-          // cache is hit, this provider must not be called.
+          // App B has an independent credential source. A shared-cache hit
+          // means this provider must not be called.
           $baseCalls = 0;
           $appBBase = function () use (&$baseCalls) {
               $baseCalls++;
-              return \\GuzzleHttp\\Promise\\Create::promiseFor(new \\Aws\\Credentials\\Credentials(
+              return \GuzzleHttp\Promise\Create::promiseFor(new \Aws\Credentials\Credentials(
                   'ASIA_APP_B_SYNTHETIC',
                   'NOT_A_REAL_SECRET',
                   'SYNTHETIC_SESSION_TOKEN',
@@ -75,29 +67,29 @@ jobs:
               ));
           };
 
-          $provider = new \\Hackthebox\\IamAuth\\Cache\\CachedCredentialProvider(
+          $provider = new \Hackthebox\IamAuth\Cache\CachedCredentialProvider(
               $appBBase,
               $store,
-              \\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore::CACHE_KEY
+              \Hackthebox\IamAuth\Cache\AwsCredentialCacheStore::CACHE_KEY
           );
           $resolved = $provider()->wait();
 
-          // Control: use a separate namespace. App B should miss App A's entry
-          // and resolve its own synthetic credentials.
+          // Control: a distinct namespace must miss App A's entry and resolve
+          // App B's own synthetic credentials.
           $controlBaseCalls = 0;
           $controlBase = function () use (&$controlBaseCalls) {
               $controlBaseCalls++;
-              return Create::promiseFor(new Credentials(
+              return \GuzzleHttp\Promise\Create::promiseFor(new \Aws\Credentials\Credentials(
                   'ASIA_APP_B_SYNTHETIC',
                   'NOT_A_REAL_SECRET',
                   'SYNTHETIC_SESSION_TOKEN',
                   time() + 3600
               ));
           };
-          $controlProvider = new \\Hackthebox\\IamAuth\\Cache\\CachedCredentialProvider(
+          $controlProvider = new \Hackthebox\IamAuth\Cache\CachedCredentialProvider(
               $controlBase,
               $store,
-              'app-b:'.\\Hackthebox\\IamAuth\\Cache\\AwsCredentialCacheStore::CACHE_KEY
+              'app-b:'.\Hackthebox\IamAuth\Cache\AwsCredentialCacheStore::CACHE_KEY
           );
           $controlResolved = $controlProvider()->wait();
 
